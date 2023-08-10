@@ -16,7 +16,7 @@ var downloadPath = path.join(__dirname, '_download');
 // list of .NET culture names
 var cultureNames = ['cs', 'de', 'es', 'fr', 'it', 'ja', 'ko', 'pl', 'pt-BR', 'ru', 'tr', 'zh-Hans', 'zh-Hant'];
 
-var allowedTypescriptVersions = ['2.3.4', '4.0.2'];
+var allowedTypescriptVersions = ['4.0.2', '4.0.8'];
 
 //------------------------------------------------------------------------------
 // shell functions
@@ -103,7 +103,7 @@ var banner = function (message, noBracket) {
 exports.banner = banner;
 
 var rp = function (relPath) {
-    return path.join(pwd() + '', relPath);
+    return path.join(shell.pwd() + '', relPath);
 }
 exports.rp = rp;
 
@@ -153,17 +153,17 @@ var getCommonPackInfo = function (modOutDir) {
 exports.getCommonPackInfo = getCommonPackInfo;
 
 var buildNodeTask = function (taskPath, outDir) {
-    var originalDir = pwd().toString();
+    var originalDir = shell.pwd().toString();
     cd(taskPath);
     var packageJsonPath = rp('package.json');
     var overrideTscPath;
     if (test('-f', packageJsonPath)) {
         // verify no dev dependencies
-        // we allow a TS dev-dependency to indicate a task should use a different TS version
+        // we allow only two dev dependencies: typescript and @tsconfig/node10
         var packageJson = JSON.parse(fs.readFileSync(packageJsonPath).toString());
         var devDeps = packageJson.devDependencies ? Object.keys(packageJson.devDependencies).length : 0;
-        if (devDeps == 1 && packageJson.devDependencies["typescript"]) {
-            var version = packageJson.devDependencies["typescript"];
+        if (devDeps === 1 && packageJson.devDependencies['typescript'] || (devDeps === 2 && packageJson.devDependencies['typescript'] && packageJson.devDependencies['@tsconfig/node10'])) {
+            var version = packageJson.devDependencies['typescript'];
             if (!allowedTypescriptVersions.includes(version)) {
                 fail(`The package.json specifies a different TS version (${version}) that the allowed versions: ${allowedTypescriptVersions}. Offending package.json: ${packageJsonPath}`);
             }
@@ -246,7 +246,7 @@ var matchFind = function (pattern, root, options) {
             });
     }
     else {
-        items = find(root)
+        items = shell.find(root)
             .filter(function (item) { // filter out the root folder
                 return path.normalize(item) != root;
             });
@@ -308,13 +308,13 @@ exports.run = run;
 
 var ensureTool = function (name, versionArgs, validate) {
     console.log(name + ' tool:');
-    var toolPath = which(name);
+    var toolPath = shell.which(name);
     if (!toolPath) {
         fail(name + ' not found.  might need to run npm install');
     }
 
     if (versionArgs) {
-        var result = exec(name + ' ' + versionArgs);
+        var result = shell.exec(name + ' ' + versionArgs);
         if (typeof validate == 'string') {
             if (result.stdout.trim() != validate) {
                 fail('expected version: ' + validate);
@@ -331,6 +331,9 @@ exports.ensureTool = ensureTool;
 
 var installNode = function (nodeVersion) {
     switch (nodeVersion || '') {
+        case '16':
+            nodeVersion = 'v16.17.1';
+            break;
         case '14':
             nodeVersion = 'v14.10.1';
             break;
@@ -345,7 +348,7 @@ var installNode = function (nodeVersion) {
             nodeVersion = 'v5.10.1';
             break;
         default:
-            fail(`Unexpected node version '${nodeVersion}'. Expected 5 or 6.`);
+            fail(`Unexpected node version '${nodeVersion}'. Supported versions: 5, 6, 10, 14, 16`);
     }
 
     if (nodeVersion === run('node -v')) {
@@ -408,7 +411,11 @@ var downloadFile = function (url) {
 
         // download the file
         mkdir('-p', path.join(downloadPath, 'file'));
-        var result = syncRequest('GET', url);
+        var result = syncRequest('GET', url, {
+            retry: true,
+            retryDelay: 5000,
+            maxRetries: 3
+        });
         fs.writeFileSync(targetPath, result.getBody());
 
         // write the completed marker
@@ -444,7 +451,11 @@ var downloadArchive = function (url, omitExtensionCheck) {
 
     // skip if already downloaded and extracted
     var scrubbedUrl = url.replace(/[/\:?]/g, '_');
-    var targetPath = path.join(downloadPath, 'archive', scrubbedUrl);
+
+    var crypto = require('crypto');
+    var newScrubbedUrl = crypto.createHash('md5').update(scrubbedUrl).digest('hex');
+
+    var targetPath = path.join(downloadPath, 'archive', newScrubbedUrl);
     var marker = targetPath + '.completed';
     if (!test('-f', marker)) {
         // download the archive
@@ -526,11 +537,26 @@ var copyGroup = function (group, sourceRoot, destRoot) {
 
     // multiply by culture name (recursive call to self)
     if (group.dest && group.dest.indexOf('<CULTURE_NAME>') >= 0) {
+        var missingCultures = [];
         cultureNames.forEach(function (cultureName) {
-            // culture names do not contain any JSON-special characters, so this is OK (albeit a hack)
-            var localizedGroupJson = JSON.stringify(group).replace(/<CULTURE_NAME>/g, cultureName);
-            copyGroup(JSON.parse(localizedGroupJson), sourceRoot, destRoot);
+            try {
+                // culture names do not contain any JSON-special characters, so this is OK (albeit a hack)
+                var localizedGroupJson = JSON.stringify(group).replace(/<CULTURE_NAME>/g, cultureName);
+                copyGroup(JSON.parse(localizedGroupJson), sourceRoot, destRoot);
+            }
+            catch (err) {
+                missingCultures.push(cultureName);
+            }
         });
+
+        // some cultures might not be present in certain dlls of TFS so just log and ignore
+        // fail in case none were present, as this indicates programmer error (or should not be copied at all)
+        if (missingCultures.length == cultureNames.length) {
+            throw new Error('Could not find a single culture even though make was instructed to copy them.');
+        }
+        if (missingCultures.length > 0) {
+            console.log('The following culture names could not be loaded as they do not exist: ' + missingCultures);
+        }
 
         return;
     }
@@ -621,6 +647,10 @@ var addPath = function (directory) {
 
     var existing = process.env['PATH'];
     if (existing) {
+        // move directory to top
+        if (existing.indexOf(directory) !== -1) {
+            existing = existing.replace(directory + separator, '');
+        }
         process.env['PATH'] = directory + separator + existing;
     }
     else {
@@ -1316,7 +1346,16 @@ var createNugetPackagePerTask = function (packagePath, /*nonAggregatedLayoutPath
 
             // Create the full task name so we don't need to rely on the folder name.
             var fullTaskName = `Mseng.MS.TF.DistributedTask.Tasks.${taskName}V${taskJsonContents.version.Major}`;
-
+            if (taskJsonContents.hasOwnProperty('_buildConfigMapping')) { 
+                for (let i in taskJsonContents._buildConfigMapping) {
+                    if (taskJsonContents._buildConfigMapping[i] === taskVersion && i.toLocaleLowerCase() !== 'default') {
+                        // take only first part of the name
+                        var postfix = i.split('-')[0];
+                        fullTaskName = fullTaskName + `_${postfix}`;
+                        break;
+                    }
+                }
+            }
             // Create xml entry for UnifiedDependencies
             unifiedDepsContent.push(`  <package id="${fullTaskName}" version="${taskVersion}" availableAtDeployTime="true" />`);
 
@@ -1348,7 +1387,7 @@ var createNugetPackagePerTask = function (packagePath, /*nonAggregatedLayoutPath
         });
 
     console.log();
-    console.log('> Creating root push.cmd');
+    console.log('> Creating root push.cmd at ' + nugetPackagesPath);
     createRootPushCmd(nugetPackagesPath);
 
     // Write file that has XML for unified dependencies, makes it easier to setup that file.
@@ -1664,29 +1703,188 @@ var storeNonAggregatedZip = function (zipPath, release, commit) {
 exports.storeNonAggregatedZip = storeNonAggregatedZip;
 
 var getTaskNodeVersion = function(buildPath, taskName) {
+    const nodes = [];
     var taskJsonPath = path.join(buildPath, taskName, "task.json");
     if (!fs.existsSync(taskJsonPath)) {
         console.warn('Unable to find task.json, defaulting to use Node 14');
-        return 14;
+        nodes.push(14);
+        return nodes;
     }
     var taskJsonContents = fs.readFileSync(taskJsonPath, { encoding: 'utf-8' });
     var taskJson = JSON.parse(taskJsonContents);
     var execution = taskJson['execution'] || taskJson['prejobexecution'];
     for (var key of Object.keys(execution)) {
-        if (key.toLowerCase() == 'node14') {
-            // Prefer node 14 and return immediately.
-            return 14;
-        } else if (key.toLowerCase() == 'node10') {
-            // Prefer node 10 and return immediately.
-            return 10;
-        } else if (key.toLowerCase() == 'node') {
-            return 6;
-        }
+        const executor = key.toLocaleLowerCase();
+        if (!executor.startsWith('node')) continue;
+        
+        const version = executor.replace('node', '');
+        nodes.push(parseInt(version) || 6);
+    }
+
+    if (nodes.length) {
+        return nodes;
     }
 
     console.warn('Unable to determine execution type from task.json, defaulting to use Node 10');
-    return 10;
+    nodes.push(10);
+    return nodes;
 }
 exports.getTaskNodeVersion = getTaskNodeVersion;
+
+/**
+ * 
+ * @param {String} buildPath - Path to the build folder
+ * @param {String} taskName - Name of the task
+ * @returns { Boolean } true if the task is a node task
+ */
+var isNodeTask = function(buildPath, taskName) {
+    const taskJsonPath = path.join(buildPath, taskName, "task.json");
+    if (!fs.existsSync(taskJsonPath)) return false;
+    
+    const taskJsonContents = fs.readFileSync(taskJsonPath, { encoding: 'utf-8' });
+    const taskJson = JSON.parse(taskJsonContents);
+    const execution = ['execution', 'prejobexecution','postjobexecution']
+        .map(key => taskJson[key]);
+    
+    for (const executors of execution) {
+        if (!executors) continue;
+        for (const key of Object.keys(executors)) {
+            const executor = key.toLocaleLowerCase();
+            if (executor.startsWith('node')) return true;
+        }
+    }
+
+    return false;
+}
+exports.isNodeTask = isNodeTask;
+
+//------------------------------------------------------------------------------
+
+function renameCodeCoverageOutput(coveragePath, taskName) {
+    if (!coveragePath) return;
+    try {
+        if (fs.existsSync(coveragePath)) {
+            if (fs.existsSync(path.join(coveragePath, "coverage-final.json"))) {
+                fs.renameSync(path.join(coveragePath, "coverage-final.json"), path.join(coveragePath, `${taskName}-coverage.json`));
+            }
+            if (fs.existsSync(path.join(coveragePath, "coverage-summary.json"))) {
+                fs.renameSync(path.join(coveragePath, "coverage-summary.json"), path.join(coveragePath, `${taskName}-coverage-summary.json`));
+            }
+        }
+    } catch (e) {
+        console.log(e)
+    }
+}
+exports.renameCodeCoverageOutput = renameCodeCoverageOutput;
+//------------------------------------------------------------------------------
+// codegen functions
+//------------------------------------------------------------------------------
+
+/**
+ * Returns path to BuldConfigGenerator, build it if needed.  Fail on compilation failure
+ * @returns Path to the executed file
+ */
+var getBuildConfigGenerator = function (baseConfigToolPath) {
+    var programPath = "";
+    var configToolBuildUtility = "";
+
+    if (os.platform() === 'win32') {
+        programPath = path.join(baseConfigToolPath, 'bin', 'BuildConfigGen.exe');
+        configToolBuildUtility = path.join(baseConfigToolPath, "dev.cmd");
+    } else {
+        programPath = path.join(baseConfigToolPath, 'bin', 'BuildConfigGen');
+        configToolBuildUtility = path.join(baseConfigToolPath, "dev.sh");
+    }
+
+    // build configToolBuildUtility if needed.  (up-to-date check will skip build if not needed)
+    run(configToolBuildUtility, true);
+
+    return programPath;
+};
+exports.getBuildConfigGenerator = getBuildConfigGenerator;
+
+/**
+ * Function to validate or write generated tasks
+ * @param {String} baseConfigToolPath Path to generating programm
+ * @param {Array} taskList  Array with allowed tasks
+ * @param {Object} makeOptions Object with all tasks
+ * @param {Boolean} writeUpdates Write Updates (false to validateOnly)
+ */
+var processGeneratedTasks = function(baseConfigToolPath, taskList, makeOptions, writeUpdates) {
+    if (!makeOptions) fail("makeOptions is not defined");
+    const excludedMakeOptionKeys = ["tasks", "taskResources"];
+    const validatingTasks = {};
+    
+    for (const key in makeOptions) {
+        if (excludedMakeOptionKeys.indexOf(key) > -1) continue;
+
+        makeOptions[key].forEach((taskName) => {
+            if (taskList.indexOf(taskName) ===  -1) return;
+            if (validatingTasks[taskName]) {
+                validatingTasks[taskName].push(key);
+            } else {
+                validatingTasks[taskName] = [key];
+            }
+        });
+    }
+
+    for (const taskName in validatingTasks) {
+        const programPath = getBuildConfigGenerator(baseConfigToolPath);
+        const config = validatingTasks[taskName];
+        const configString = config.join("|");
+        const args = [
+            "--configs",
+            `"${configString}"`,
+            "--task",
+            taskName,
+        ];
+
+        var writeUpdateArg = "";
+        if(writeUpdates)
+        {
+            writeUpdateArg += " --write-updates";
+        }
+
+        banner('Validating: ' + taskName);
+        run(`${programPath} ${args.join(' ')} ${writeUpdateArg}`, true);
+    }
+}
+exports.processGeneratedTasks = processGeneratedTasks;
+
+/**
+ * Function to generate new tasks
+ * @param {String} baseConfigToolPath Path to generating program
+ * @param {Array} taskList  Array with allowed tasks
+ * @param {String} configsString String with generation configs 
+ * @param {Object} makeOptions Object to put generated definitions
+ */
+
+var generateTasks = function(baseConfigToolPath, taskList, configsString, makeOptions) {
+    const args = `--write-updates --configs "${configsString}"`;
+    const configsArr = configsString.split("|")
+    let newMakeOptions = makeOptions;
+
+    taskList.forEach(function (taskName) {
+        const programPath = getBuildConfigGenerator(baseConfigToolPath);
+        const buildArgs = args + ` --task ${taskName}`;
+
+        banner('Generating: ' + taskName);
+        run(`${programPath} ${buildArgs}` , true);
+
+        // insert to make-options.json
+        configsArr.forEach(function (config) {
+            if (!newMakeOptions[config]) {
+                newMakeOptions[config] = [];
+            }
+            
+            if (newMakeOptions[config].indexOf(taskName) === -1) {
+                newMakeOptions[config].push(taskName);
+            }
+        });
+    });
+
+    return newMakeOptions;
+}
+exports.generateTasks = generateTasks;
 
 //------------------------------------------------------------------------------

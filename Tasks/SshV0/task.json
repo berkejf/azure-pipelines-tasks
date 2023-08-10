@@ -17,8 +17,8 @@
     "author": "Microsoft Corporation",
     "version": {
         "Major": 0,
-        "Minor": 200,
-        "Patch": 0
+        "Minor": 226,
+        "Patch": 2
     },
     "demands": [],
     "minimumAgentVersion": "2.144.0",
@@ -135,10 +135,23 @@
                 "expression": "isMatch(value, '(^\\d*$)','Multiline')",
                 "message": "Enter a valid value for timeout."
             }
+        },
+        {
+            "name": "interactiveKeyboardAuthentication",
+            "type": "boolean",
+            "label": "Use interactive-keyboard authentication",
+            "defaultValue": false,
+            "required": false,
+            "groupName": "advanced",
+            "helpMarkDown": "Use this value if PasswordAuthentication is disabled on the target machine"
         }
     ],
     "execution": {
         "Node10": {
+            "target": "ssh.js",
+            "argumentFormat": ""
+        },
+        "Node16": {
             "target": "ssh.js",
             "argumentFormat": ""
         }
@@ -152,6 +165,7 @@
         "RemoteScriptFileCleanUpFailed": "Failed to delete the script file copied to the remote machine. Error = %s.",
         "SettingUpSshConnection": "Trying to establish an SSH connection to %s@%s:%s",
         "SshConnectionSuccessful": "Successfully connected.",
-        "UseDefaultPort": "Using port 22 which is the default for SSH since no port was specified."
+        "UseDefaultPort": "Using port 22 which is the default for SSH since no port was specified.",
+        "ScriptArgsSanitized": "Detected characters in arguments that may not be executed correctly by the shell. Please escape special characters using backslash (\\). More information is available here: https://aka.ms/ado/75787"
     }
 }

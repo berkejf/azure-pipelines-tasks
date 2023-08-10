@@ -16,7 +16,7 @@
   "author": "Microsoft Corporation",
   "version": {
     "Major": 3,
-    "Minor": 200,
+    "Minor": 225,
     "Patch": 0
   },
   "releaseNotes": "ms-resource:loc.releaseNotes",
@@ -209,6 +209,7 @@
       "visibleRule": "javaHomeSelection = JDKVersion",
       "options": {
         "default": "default",
+        "1.17": "JDK 17",
         "1.11": "JDK 11",
         "1.10": "JDK 10 (out of support)",
         "1.9": "JDK 9 (out of support)",
@@ -379,6 +380,10 @@
     "Node10": {
       "target": "gradletask.js",
       "argumentFormat": ""
+    },
+    "Node16": {
+      "target": "gradletask.js",
+      "argumentFormat": ""
     }
   },
   "messages": {
@@ -417,6 +422,7 @@
     "InvalidBuildFile": "ms-resource:loc.messages.InvalidBuildFile",
     "FileNotFound": "ms-resource:loc.messages.FileNotFound",
     "FailedToAppendCC": "ms-resource:loc.messages.FailedToAppendCC",
-    "NoTestResults": "ms-resource:loc.messages.NoTestResults"
+    "NoTestResults": "ms-resource:loc.messages.NoTestResults",
+    "chmodGradlew": "ms-resource:loc.messages.chmodGradlew"
   }
 }

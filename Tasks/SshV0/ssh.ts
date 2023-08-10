@@ -5,6 +5,8 @@ import * as fs from 'fs';
 import * as sshHelper from './ssh2helpers';
 import { v4 as generateRandomUUID } from 'uuid';
 import { ConnectConfig } from 'ssh2';
+import { sanitizeArgs } from 'azure-pipelines-tasks-utility-common/argsSanitizer';
+import { emitTelemetry } from "azure-pipelines-tasks-utility-common/telemetry";
 
 /**
  * By default configuration, SSH runs on port 22.
@@ -23,6 +25,7 @@ async function run() {
 
         //read SSH endpoint input
         const sshEndpoint = tl.getInput('sshEndpoint', true);
+        const tryKeyboard: boolean = tl.getBoolInput('interactiveKeyboardAuthentication', false);
         const username: string = tl.getEndpointAuthorizationParameter(sshEndpoint, 'username', false);
         const password: string = tl.getEndpointAuthorizationParameter(sshEndpoint, 'password', true); //passphrase is optional
         const privateKey: string = process.env['ENDPOINT_DATA_' + sshEndpoint + '_PRIVATEKEY']; //private key is optional, password can be used for connecting
@@ -36,7 +39,8 @@ async function run() {
             host: hostname,
             port: port,
             username: username,
-            readyTimeout: readyTimeout
+            readyTimeout: readyTimeout,
+            tryKeyboard: tryKeyboard,
         };
 
         if (privateKey) {
@@ -133,12 +137,12 @@ async function run() {
 					scpConfig.tryKeyboard = true;
                 }
 
-                 //copy script file to remote machine
+                //copy script file to remote machine
                 tl.debug('Copying script to remote machine.');
                 await sshHelper.copyScriptToRemoteMachine(scriptFile, remoteScriptPath, scpConfig);
 
                 //change the line encodings
-                let originalScriptPath: string = ''; 
+                let originalScriptPath: string = '';
                 if (isWin) {
                     tl.debug('Fixing the line endings in case the file was created in Windows');
                     originalScriptPath = remoteScriptPath;
@@ -153,7 +157,37 @@ async function run() {
                 //run remote script file with args on the remote machine
                 let runScriptCmd = remoteScriptPath;
                 if (args) {
-                    runScriptCmd = runScriptCmd.concat(' ' + args);
+                    let resultArgs = args;
+
+                    const featureFlags = {
+                        audit: tl.getBoolFeatureFlag('AZP_75787_ENABLE_NEW_LOGIC_LOG'),
+                        activate: tl.getBoolFeatureFlag('AZP_75787_ENABLE_NEW_LOGIC'),
+                        telemetry: tl.getBoolFeatureFlag('AZP_75787_ENABLE_COLLECT')
+                    };
+
+                    if (featureFlags.activate || featureFlags.audit || featureFlags.telemetry) {
+                        const [sanitizedArgs, telemetry] = sanitizeArgs(
+                            args,
+                            {
+                                argsSplitSymbols: '\\\\',
+                                saniziteRegExp: new RegExp(`(?<!\\\\)([^a-zA-Z0-9\\\\ _'"\\-=\\/:.])`, 'g')
+                            }
+                        );
+                        if (sanitizedArgs !== args) {
+                            if (featureFlags.telemetry && telemetry) {
+                                emitTelemetry('TaskHub', 'SshV0', telemetry);
+                            }
+                            const message = tl.loc('ScriptArgsSanitized');
+                            if (featureFlags.activate) {
+                                throw new Error(message);
+                            }
+                            if (featureFlags.audit) {
+                                tl.warning(message);
+                            }
+                        }
+                    }
+
+                    runScriptCmd = runScriptCmd.concat(' ' + resultArgs);
                 }
 
                 //setup command to clean up script file
@@ -169,7 +203,7 @@ async function run() {
         }
 
     } catch (err) {
-        tl.setResult(tl.TaskResult.Failed, err);
+        tl.setResult(tl.TaskResult.Failed, err.message);
     } finally {
         //clean up script file if needed
         if (cleanUpScriptCmd) {

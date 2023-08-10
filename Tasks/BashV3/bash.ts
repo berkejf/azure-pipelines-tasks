@@ -3,30 +3,51 @@ import path = require('path');
 import tl = require('azure-pipelines-task-lib/task');
 import tr = require('azure-pipelines-task-lib/toolrunner');
 var uuidV4 = require('uuid/v4');
+import { sanitizeArgs } from 'azure-pipelines-tasks-utility-common/argsSanitizer';
+import { emitTelemetry } from "azure-pipelines-tasks-utility-common/telemetry";
 
-async function translateDirectoryPath(bashPath: string, directoryPath: string): Promise<string> {
-    let bashPwd = tl.tool(bashPath)
-        .arg('-c')
-        .arg('pwd');
+async function runBashPwd(bashPath: string, directoryPath: string): Promise<string> {
+    let pwdOutput = '';
+    const bashPwd = tl.tool(bashPath).arg('-c').arg('pwd');
+    bashPwd.on('stdout', data => pwdOutput += data.toString());
 
-    let bashPwdOptions = <tr.IExecOptions>{
+    const bashPwdOptions = <tr.IExecOptions>{
         cwd: directoryPath,
         failOnStdErr: true,
         errStream: process.stdout,
         outStream: process.stdout,
         ignoreReturnCode: false
     };
-    let pwdOutput = '';
-    bashPwd.on('stdout', (data) => {
-        pwdOutput += data.toString();
-    });
+
     await bashPwd.exec(bashPwdOptions);
+
     pwdOutput = pwdOutput.trim();
+
     if (!pwdOutput) {
         throw new Error(tl.loc('JS_TranslatePathFailed', directoryPath));
     }
 
-    return `${pwdOutput}`;
+    return pwdOutput;
+}
+
+async function translateDirectoryPath(bashPath: string, directoryPath: string): Promise<string> {
+    if (directoryPath.endsWith('\\')) {
+        directoryPath = directoryPath.slice(0, -1);
+    }
+
+    const directoryPathTranslated = await runBashPwd(bashPath, directoryPath);
+
+    const parentDirectoryPath = directoryPath.split('\\').slice(0, -1).join('\\');
+
+    if (parentDirectoryPath.split('\\').join('')) {
+        const parentDirectoryPathTranslated = await runBashPwd(bashPath, parentDirectoryPath);
+
+        if (directoryPathTranslated == parentDirectoryPathTranslated) {
+            throw new Error(tl.loc('JS_TranslatePathFailed', directoryPath));
+        }
+    }
+
+    return directoryPathTranslated;
 }
 
 /**
@@ -94,14 +115,45 @@ async function run() {
             else {
                 targetFilePath = input_filePath;
             }
+
+            let resultArgs = input_arguments;
+
+            const featureFlags = {
+                audit: tl.getBoolFeatureFlag('AZP_75787_ENABLE_NEW_LOGIC_LOG'),
+                activate: tl.getBoolFeatureFlag('AZP_75787_ENABLE_NEW_LOGIC'),
+                telemetry: tl.getBoolFeatureFlag('AZP_75787_ENABLE_COLLECT')
+            };
+
+            if (featureFlags.activate || featureFlags.audit || featureFlags.telemetry) {
+                const [sanitizedArgs, telemetry] = sanitizeArgs(
+                    input_arguments,
+                    {
+                        argsSplitSymbols: '\\\\',
+                        saniziteRegExp: new RegExp(`(?<!\\\\)([^a-zA-Z0-9\\\\ _'"\\-=\\/:.])`, 'g')
+                    }
+                );
+                if (sanitizedArgs !== input_arguments) {
+                    if (featureFlags.telemetry && telemetry) {
+                        emitTelemetry('TaskHub', 'BashV3', telemetry);
+                    }
+                    const message = tl.loc('ScriptArgsSanitized');
+                    if (featureFlags.activate) {
+                        throw new Error(message);
+                    }
+                    if (featureFlags.audit) {
+                        tl.warning(message);
+                    }
+                }
+            }
+
             // Choose behavior:
             // If they've set old_source_behavior, source the script. This is what we used to do and needs to hang around forever for back compat reasons
             // If they've not, execute the script with bash. This is our new desired behavior.
             // See https://github.com/Microsoft/azure-pipelines-tasks/blob/master/docs/bashnote.md
             if (old_source_behavior) {
-                contents = `. '${targetFilePath.replace(/'/g, "'\\''")}' ${input_arguments}`.trim();
+                contents = `. '${targetFilePath.replace(/'/g, "'\\''")}' ${resultArgs}`.trim();
             } else {
-                contents = `exec bash '${targetFilePath.replace(/'/g, "'\\''")}' ${input_arguments}`.trim();
+                contents = `exec bash '${targetFilePath.replace(/'/g, "'\\''")}' ${resultArgs}`.trim();
             }
             console.log(tl.loc('JS_FormattedCommand', contents));
         }
@@ -121,7 +173,8 @@ async function run() {
         tl.checkPath(tempDirectory, `${tempDirectory} (agent.tempDirectory)`);
         let fileName = uuidV4() + '.sh';
         let filePath = path.join(tempDirectory, fileName);
-        await fs.writeFileSync(
+
+        fs.writeFileSync(
             filePath,
             contents,
             { encoding: 'utf8' });
@@ -184,6 +237,16 @@ async function run() {
     catch (err) {
         tl.setResult(tl.TaskResult.Failed, err.message || 'run() failed', true);
     }
+}
+
+function getFeatureFlagValue(featureFlagName: string, defaultValue: boolean = false): boolean {
+    const ffValue = process.env[featureFlagName]
+
+    if (!ffValue) {
+        return defaultValue
+    }
+
+    return ffValue.toLowerCase() === "true"
 }
 
 run();

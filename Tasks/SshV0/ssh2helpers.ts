@@ -114,7 +114,8 @@ export function setupSshClientConnection(sshConfig: any): Q.Promise<any> {
 	    finish([sshConfig.password]);
     }).on('error', (err) => {
         defer.reject(err);
-    }).connect(sshConfig);
+    }).on('keyboard-interactive', (name, instructions, instructionsLang, prompts, finish) => { finish([sshConfig.password]); })
+    .connect(sshConfig);
     return defer.promise;
 }
 

@@ -47,10 +47,17 @@ export class MultiFilePackage extends Package {
     }
 
     private async getPackageFileContent(fileMetadata: any): Promise<Map<string, PackageFileResult>> {
-        return new Promise<Map<string, PackageFileResult>>(resolve => {
+        return new Promise<Map<string, PackageFileResult>>((resolve, reject) => {
             var resultMap = new Map<string, PackageFileResult>();
-            resultMap[fileMetadata.name] = new PackageFileResult(fileMetadata.protocolMetadata.data.Content, false);
-            return resolve(resultMap);
+            var content = fileMetadata.protocolMetadata.data.content as string;
+
+            if(typeof content !='undefined' && content)
+            {
+                resultMap[fileMetadata.name] = new PackageFileResult(content, false);
+                return resolve(resultMap);
+            }
+
+            throw reject('Unable to download package with empty content.');
         });
     }
 
@@ -74,7 +81,7 @@ export class MultiFilePackage extends Package {
                         if (filteredFileList.has(fileMetadatas[i].name)) {
                             const fileMetadata = fileMetadatas[i];
                             pkgFileUrlPromises.push(
-                                fileMetadata.protocolMetadata.data.StorageId != null
+                                fileMetadata.protocolMetadata.data.storageId != null
                                     ? this.getPackageFileDownloadUrl(feedId, project, packageMetadata, fileMetadata)
                                     : this.getPackageFileContent(fileMetadata)
                             );

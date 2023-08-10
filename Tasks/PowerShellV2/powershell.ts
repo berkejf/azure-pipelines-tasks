@@ -3,9 +3,11 @@ import path = require('path');
 import os = require('os');
 import tl = require('azure-pipelines-task-lib/task');
 import tr = require('azure-pipelines-task-lib/toolrunner');
+import { sanitizeArgs } from 'azure-pipelines-tasks-utility-common/argsSanitizer';
+import { emitTelemetry } from "azure-pipelines-tasks-utility-common/telemetry";
 var uuidV4 = require('uuid/v4');
 
-function getActionPreference(vstsInputName: string, defaultAction: string = 'Default', validActions: string[] = [ 'Default', 'Stop', 'Continue', 'SilentlyContinue' ]) {
+function getActionPreference(vstsInputName: string, defaultAction: string = 'Default', validActions: string[] = ['Default', 'Stop', 'Continue', 'SilentlyContinue']) {
     let result: string = tl.getInput(vstsInputName, false) || defaultAction;
 
     if (validActions.map(actionPreference => actionPreference.toUpperCase()).indexOf(result.toUpperCase()) < 0) {
@@ -25,6 +27,8 @@ async function run() {
         let input_informationPreference: string = getActionPreference('informationPreference', 'Default');
         let input_verbosePreference: string = getActionPreference('verbosePreference', 'Default');
         let input_debugPreference: string = getActionPreference('debugPreference', 'Default');
+        let input_progressPreference: string = getActionPreference('progressPreference', 'SilentlyContinue');
+
         let input_showWarnings = tl.getBoolInput('showWarnings', false);
         let input_failOnStderr = tl.getBoolInput('failOnStderr', false);
         let input_ignoreLASTEXITCODE = tl.getBoolInput('ignoreLASTEXITCODE', false);
@@ -67,8 +71,37 @@ async function run() {
         if (input_debugPreference.toUpperCase() != 'DEFAULT') {
             contents.push(`$DebugPreference = '${input_debugPreference}'`);
         }
+        if (input_progressPreference.toUpperCase() != 'DEFAULT') {
+            contents.push(`$ProgressPreference = '${input_progressPreference}'`);
+        }
+
         let script = '';
         if (input_targetType.toUpperCase() == 'FILEPATH') {
+            const featureFlags = {
+                audit: tl.getBoolFeatureFlag('AZP_75787_ENABLE_NEW_LOGIC_LOG'),
+                activate: tl.getBoolFeatureFlag('AZP_75787_ENABLE_NEW_LOGIC'),
+                telemetry: tl.getBoolFeatureFlag('AZP_75787_ENABLE_COLLECT')
+            };
+
+            if (featureFlags.activate || featureFlags.audit || featureFlags.telemetry) {
+                const [sanitizedArgs, telemetry] = sanitizeArgs(
+                    input_arguments,
+                    { argsSplitSymbols: '``' }
+                );
+                if (sanitizedArgs !== input_arguments) {
+                    if (featureFlags.telemetry && telemetry) {
+                        emitTelemetry('TaskHub', 'PowerShellV2', telemetry);
+                    }
+                    const message = tl.loc('ScriptArgsSanitized');
+                    if (featureFlags.activate) {
+                        throw new Error(message);
+                    }
+                    if (featureFlags.audit) {
+                        tl.warning(message);
+                    }
+                }
+            }
+
             script = `. '${input_filePath.replace(/'/g, "''")}' ${input_arguments}`.trim();
         } else {
             script = `${input_script}`;
@@ -117,7 +150,7 @@ async function run() {
         // Note, use "-Command" instead of "-File" to match the Windows implementation. Refer to
         // comment on Windows implementation for an explanation why "-Command" is preferred.
         console.log('========================== Starting Command Output ===========================');
-        
+
         const executionOperator = input_runScriptInSeparateScope ? '&' : '.';
         let powershell = tl.tool(tl.which('pwsh') || tl.which('powershell') || tl.which('pwsh', true))
             .arg('-NoLogo')
